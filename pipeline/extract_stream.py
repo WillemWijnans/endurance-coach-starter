@@ -6,7 +6,13 @@ The intervals.icu MCP dumps the full stream (>1MB) to a tool-result temp file
 when it exceeds the token limit. This trims it to just the streams we use and
 saves to streams/{activity_id}.json.
 
-Usage: python3 extract_stream.py <raw_tool_result_file> <activity_id> [type|env]
+Usage: python3 extract_stream.py <raw_tool_result_file> <activity_id> [type|env] [trainer]
+
+⚠️ PASS THE TRAINER FLAG when you take the hint from the activity list. A trainer
+session recorded on a head unit rather than through Zwift is typed "Ride" by the
+platform, and indoor/outdoor use SEPARATE ventilation bands — so the type alone
+sends an indoor ride to the outdoor zones. `trainer` accepts 1/true/yes and
+forces indoor. Passing "indoor"/"outdoor" directly also works and needs no flag.
 
 The streams-only MCP dump carries no activity type, so pass the type/env you
 already see in the activity list (VirtualRide/Ride or indoor/outdoor) as the
@@ -46,9 +52,19 @@ def extract(raw_file, activity_id, type_hint=None):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (3, 4):
-        sys.exit("usage: extract_stream.py <raw_tool_result_file> <activity_id> [type|env]")
+    if len(sys.argv) not in (3, 4, 5):
+        sys.exit("usage: extract_stream.py <raw_tool_result_file> <activity_id> "
+                 "[type|env] [trainer]")
     type_hint = sys.argv[3] if len(sys.argv) > 3 else None
+    trainer = len(sys.argv) > 4 and sys.argv[4].strip().lower() in ("1", "true", "yes", "trainer")
+    if trainer:
+        # Resolve to indoor NOW, before it is stored — analyze.py reads the
+        # stored activity_type and never sees the flag.
+        type_hint = "indoor"
     out, n, ve_n, atype = extract(sys.argv[1], sys.argv[2], type_hint)
     env = R.env_from_type(atype) or "?"
-    print(f"saved {out} — {n} samples, VE={ve_n}, type={atype} → {env}")
+    note = "  (trainer flag → forced indoor)" if trainer else ""
+    print(f"saved {out} — {n} samples, VE={ve_n}, type={atype} → {env}{note}")
+    if env == "?":
+        print("⚠️  environment UNKNOWN — re-run with 'indoor' or 'outdoor' as the "
+              "3rd argument, or the ride will be scored against the wrong VE bands")
