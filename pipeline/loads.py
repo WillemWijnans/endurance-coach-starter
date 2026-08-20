@@ -18,14 +18,14 @@ So the SIGNAL IS THE RATIO, not either number:
 
 A WORKED EXAMPLE (real data, one athlete). Read in order:
 
-    day 0   22C      power_load 142  hr_load 181  ratio 1.27   <-- fell ill that evening
+    day 0   22C      power_load 142  hr_load 181  ratio 1.27   <-- cold sore that evening
     ...four days later, same illness still active...
     day 1   30-35C   power_load 169  hr_load 253  ratio 1.50   <-- heat ON TOP of it
     day 2   27C      power_load 264  hr_load 220  ratio 0.83
     day 3            power_load 259  hr_load 228  ratio 0.88
 
 Day 0 is the metric's best argument: decoupling on that ride was +0.38%, which
-reads as excellent durability, and the illness appeared that evening. The ratio
+reads as excellent durability, and the cold sore appeared that evening. The ratio
 saw immune activation that the power-based numbers could not.
 
 Day 1 needs care, and is a useful lesson in not over-claiming. It is tempting to

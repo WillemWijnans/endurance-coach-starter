@@ -38,16 +38,40 @@ STREAM_DIR = C.STREAM_DIR
 VE_BANDS = C.VE_BANDS
 VT2_LOAD = C.VT2_LOAD
 
-# intervals.icu activity type → training environment. "VirtualRide" = trainer/
-# Zwift (indoor); "Ride" = real road/gravel (outdoor). Single source of truth so
-# env can be auto-derived instead of hand-typed (and mis-typed).
-TYPE_ENV = {"VirtualRide": "indoor", "Ride": "outdoor"}
-ENV_TYPE = {v: k for k, v in TYPE_ENV.items()}   # indoor->VirtualRide, outdoor->Ride
+# intervals.icu activity type → training environment. Getting this right matters:
+# indoor and outdoor have SEPARATE ventilation bands, so a misclassified ride is
+# scored against the wrong zones entirely.
+#
+# NEITHER SIGNAL IS RELIABLE ALONE. Measured across one athlete's 156 rides:
+#   type=Ride,        trainer=False   68   outdoor, correct
+#   type=VirtualRide, trainer=True    60   indoor, correct
+#   type=VirtualRide, trainer=False   19   indoor, but the trainer flag is absent
+#   type=GravelRide,  trainer=False    7   outdoor, and NOT in the old type map
+#   type=Ride,        trainer=True     1   indoor ridden on a head unit, so the
+#                                          platform typed it as an outdoor Ride
+# The last row is the trap: a trainer session recorded on a bike computer rather
+# than through Zwift comes back as "Ride". Trusting type alone misreads it.
+#
+# So: INDOOR if the type says virtual OR the trainer flag is set. Outdoor
+# otherwise, for any recognised outdoor type.
+INDOOR_TYPES = {"VirtualRide", "VirtualRun"}
+OUTDOOR_TYPES = {"Ride", "GravelRide", "MountainBikeRide", "TrackRide", "Cyclocross"}
+TYPE_ENV = {**{t: "indoor" for t in INDOOR_TYPES},
+            **{t: "outdoor" for t in OUTDOOR_TYPES}}
+ENV_TYPE = {"indoor": "VirtualRide", "outdoor": "Ride"}   # canonical per env
 ENV_LABEL = {"indoor": "🏠 INDOOR", "outdoor": "🏞️ OUTDOOR"}
 
 
-def env_from_type(activity_type):
-    """Map an intervals.icu activity type to indoor/outdoor; None if unknown."""
+def env_from_type(activity_type, trainer=None):
+    """Map an activity type (+ optional trainer flag) to indoor/outdoor.
+
+    The trainer flag WINS when set, because it describes what the rider was
+    actually doing; the type describes how the file was recorded. Returns None
+    when neither signal identifies the environment, so callers can ask rather
+    than guess.
+    """
+    if trainer:
+        return "indoor"
     return TYPE_ENV.get(activity_type) if activity_type else None
 
 

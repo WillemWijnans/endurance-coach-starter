@@ -240,3 +240,43 @@ if __name__ == "__main__":
             failed += 1
     print(f"\n{passed} passed, {failed} failed")
     sys.exit(1 if failed else 0)
+
+
+# ---- environment detection: type AND trainer flag ----
+# Indoor and outdoor have separate VE bands, so a misclassified ride is scored
+# against the wrong zones entirely. Neither signal is reliable on its own.
+def test_virtual_ride_is_indoor():
+    assert R.env_from_type("VirtualRide") == "indoor"
+
+def test_plain_ride_is_outdoor():
+    assert R.env_from_type("Ride") == "outdoor"
+
+def test_gravel_ride_is_outdoor():
+    """REGRESSION: GravelRide was missing from the type map and returned None,
+    silently losing 7 rides from environment-aware analysis."""
+    assert R.env_from_type("GravelRide") == "outdoor"
+
+def test_other_outdoor_types_recognised():
+    for t in ("MountainBikeRide", "TrackRide", "Cyclocross"):
+        assert R.env_from_type(t) == "outdoor"
+
+def test_trainer_flag_overrides_an_outdoor_type():
+    """THE TRAP: a trainer session recorded on a head unit rather than through
+    Zwift comes back typed 'Ride'. The trainer flag is what catches it."""
+    assert R.env_from_type("Ride", trainer=True) == "indoor"
+
+def test_virtual_ride_stays_indoor_without_a_trainer_flag():
+    """The inverse case: 19 real rides are VirtualRide with the flag absent."""
+    assert R.env_from_type("VirtualRide", trainer=False) == "indoor"
+    assert R.env_from_type("VirtualRide", trainer=None) == "indoor"
+
+def test_unknown_type_returns_none_so_callers_can_ask():
+    for t in (None, "", "Swim", "Yoga"):
+        assert R.env_from_type(t) is None
+
+def test_unknown_type_with_trainer_flag_is_still_indoor():
+    assert R.env_from_type(None, trainer=True) == "indoor"
+
+def test_env_type_round_trips():
+    for env in ("indoor", "outdoor"):
+        assert R.env_from_type(R.ENV_TYPE[env]) == env
