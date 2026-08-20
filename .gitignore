@@ -1,0 +1,12 @@
+data/
+*.env
+.env
+__pycache__/
+*.pyc
+.DS_Store
+*.png
+.pytest_cache/
+
+# YOUR calibration and credentials — never commit these
+athlete_config_local.py
+.env
