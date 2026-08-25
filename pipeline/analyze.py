@@ -5,6 +5,7 @@ appends one row to master_log_v2.csv (safe csv writer — no more comma bugs),
 and prints a clean report.
 
 Usage: python3 analyze.py <activity_id> [indoor|outdoor|auto] [date] [name]
+                          [--fluid ML] [--carb G] [--protein G]
 
 env defaults to "auto" — derived from the intervals activity type stored at
 extract time (VirtualRide→indoor, Ride→outdoor). Pass indoor/outdoor only to
@@ -17,6 +18,7 @@ import sys
 from pathlib import Path
 import athlete_config as C
 import ridelib as R
+import fuellib as F
 
 LOG = C.MASTER_LOG
 
@@ -26,7 +28,17 @@ COLS = ["activity_id", "date", "env", "name", "moving_min", "elapsed_min", "paus
         "ve_avg", "ve_rmax30", "br_avg", "ef", "ve_ef", "decoupling_pct",
         "veZ1", "veZ2", "veZ3", "veZ4", "veZ5",
         "hrREC", "hrZ2", "hrTEMPO", "hrTHRESH", "hrVO2", "div_pp",
-        "hrr_avg", "ver_avg", "brr_avg", "n_gaps", "long_stop_min", "decoupling_clean"]
+        "hrr_avg", "ver_avg", "brr_avg", "n_gaps", "long_stop_min", "decoupling_clean",
+        # fuelling (self-reported, blank when not logged — blank is NOT zero)
+        "fluid_ml", "carb_g", "protein_g", "fluid_hit", "carb_hit"]
+
+
+def load_rows():
+    """Existing log rows, for the rolling fuel hit-rate."""
+    if not LOG.exists():
+        return []
+    with LOG.open() as f:
+        return list(csv.DictReader(f))
 
 
 def append_row(metrics):
@@ -87,11 +99,54 @@ def report(m):
 {'='*60}"""
 
 
+def pop_flags(argv):
+    """Strip --fluid/--carb/--protein/--bike out of argv so the positional args
+    keep working exactly as before. Returns (remaining_argv, fuel_dict)."""
+    out, fuel, i = [], {}, 0
+    nums = {"--fluid": "fluid_ml", "--carb": "carb_g", "--protein": "protein_g",
+            "--temp": "temp_c"}
+    text = {"--bike": "bike"}
+    while i < len(argv):
+        a = argv[i]
+        if a in text:
+            if i + 1 >= len(argv):
+                sys.exit(f"{a} needs a value")
+            fuel[text[a]] = argv[i + 1]
+            i += 2
+            continue
+        if a in nums:
+            if i + 1 >= len(argv):
+                sys.exit(f"{a} needs a number")
+            try:
+                fuel[nums[a]] = float(argv[i + 1])
+            except ValueError:
+                sys.exit(f"{a} needs a number, got {argv[i + 1]!r}")
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    return out, fuel
+
+
+def fuel_history(rows):
+    """Rolling hit-rate. THIS is the intervention: a visibly failing metric.
+    Prose advice reliably fails to change fuelling behaviour; a number you can
+    watch tends to work, the same way a weight log changes weigh-ins."""
+    lines = []
+    for field, label in (("fluid_hit", "fluid"), ("carb_hit", "carb")):
+        hits, seen = F.hit_rate(rows, field)
+        if seen >= 3:
+            lines.append(f"  {label} target hit {hits} of the last {seen} logged rides")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        sys.exit("usage: analyze.py <activity_id> [indoor|outdoor|auto] [date] [name]")
-    aid = sys.argv[1]
-    env_arg = sys.argv[2] if len(sys.argv) > 2 else "auto"
+    argv, fuel = pop_flags(sys.argv[1:])
+    if not argv:
+        sys.exit("usage: analyze.py <activity_id> [indoor|outdoor|auto] [date] [name] "
+                 "[--fluid ML] [--carb G] [--protein G] [--bike winspace|lauf]")
+    aid = argv[0]
+    env_arg = argv[1] if len(argv) > 1 else "auto"
     meta = R.load_meta(aid)
     try:
         env, warn = R.resolve_env(env_arg, meta.get("activity_type"))
@@ -99,13 +154,37 @@ if __name__ == "__main__":
         sys.exit(f"env: {e}")
     if warn:
         print(f"⚠️  {warn}")
-    date = sys.argv[3] if len(sys.argv) > 3 else meta.get("date", "")
-    name = sys.argv[4] if len(sys.argv) > 4 else meta.get("name", "")
+    date = argv[2] if len(argv) > 2 else meta.get("date", "")
+    name = argv[3] if len(argv) > 3 else meta.get("name", "")
     streams = R.load_stream(aid)
     m = R.compute(streams, env, activity_id=aid, date=date, name=name)
     print(report(m))
+
+    # ── fuelling. A missing number is blank, never zero: scoring an unlogged
+    # ride as a miss would punish forgetting to log rather than under-fuelling.
+    a = F.assess(fuel.get("fluid_ml"), fuel.get("carb_g"), m["moving_min"],
+                 temp_c=fuel.get("temp_c"))
+    if a:
+        m["fluid_ml"] = fuel.get("fluid_ml", "")
+        m["carb_g"] = fuel.get("carb_g", "")
+        m["protein_g"] = fuel.get("protein_g", "")
+        m["fluid_hit"] = int(a["fluid_hit"]) if "fluid_hit" in a else ""
+        m["carb_hit"] = int(a["carb_hit"]) if "carb_hit" in a else ""
+        print("\n  FUELLING")
+        print(F.line(a))
+        need, covered = F.refill_needed(m["moving_min"], fuel.get("bike"))
+        if need:
+            print(f"  ⚠️  carrying capacity covers only {covered}min — a refill stop "
+                  f"was required on this bike")
+    else:
+        print("\n  FUELLING  — not logged. Add --fluid ML --carb G to record it.")
+
+    prior = load_rows()
     total = append_row(m)
     print(f"\nLogged to master_log_v2.csv ({total} rides)")
+    hist = fuel_history(prior + [m])
+    if hist:
+        print(hist)
     # A dated row is REQUIRED: every trend/EF/period analysis filters on date, so
     # an undated row is logged but silently invisible. This bit us — 6 rides from
     # Jul 19-Aug 10 2026 were missing from every date-based analysis until spotted

@@ -120,6 +120,30 @@ HEADWIND_NOTABLE = 45              # % of the ride into a headwind. Roughly a
                                    # so well above a third is a real tax.
 WIND_STRONG_MS = 6                 # mean wind speed, m/s
 
+# ─────────────────────────────────────────── FUELLING
+# CALIBRATE: sweat rate varies 2-3x between individuals and with climate. Start
+# from the sports-nutrition consensus below, then adjust from YOUR OWN rides.
+#
+# Reported in BOTTLES rather than ml/h on purpose: "finish both bottles and
+# refill once" is executable at a roadside tap; "500-750 ml/h" is arithmetic you
+# only do afterwards. CARRYING CAPACITY IS A HARD CONSTRAINT — set BIKES to your
+# real cage count and bottle size, because a bike that cannot carry the target
+# makes the target unreachable without a planned stop.
+FUEL = {
+    "fluid_ml_per_h": (500, 750),   # CALIBRATE
+    "carb_g_per_h":   (60, 90),     # 90 needs 2:1 glucose:fructose to absorb
+    "protein_g_post": 25,           # within ~1h of finishing
+    "bottle_ml":      500,          # CALIBRATE: your default bike's bottle
+    "heat_fluid_mult": 1.25,        # multiplier at/above TEMP_HOT
+    "no_fuel_below_min": 60,        # under this, ride on what you already have
+}
+
+# CALIBRATE: one entry per bike. cages x bottle_ml = what you can carry.
+BIKES = {
+    "road": {"cages": 2, "bottle_ml": 500, "kind": "road"},
+}
+DEFAULT_BIKE = "road"
+
 # ─────────────────────────────────────────────────────────── PATHS
 from pathlib import Path
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
