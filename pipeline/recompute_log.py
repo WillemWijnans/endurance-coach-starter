@@ -22,6 +22,13 @@ from analyze import COLS, LOG
 SD = C.STREAM_DIR
 
 
+# Columns that come from the ATHLETE, not from the stream. ridelib cannot
+# recompute these, so they must be carried across from the existing row or they
+# are silently destroyed. This bit us on Aug 26 2026: a recompute wiped the
+# fluid/carb data on the only two rides that had it, minutes after it was logged.
+SELF_REPORTED = ("fluid_ml", "carb_g", "protein_g", "fluid_hit", "carb_hit")
+
+
 def recompute():
     old = list(csv.DictReader(LOG.open()))
     out, recomputed, preserved = [], 0, []
@@ -32,7 +39,12 @@ def recompute():
             try:
                 m = R.compute(R.load_stream(aid), env, activity_id=aid,
                               date=r.get("date", ""), name=r.get("name", ""))
-                out.append({k: m.get(k, "") for k in COLS})
+                row = {k: m.get(k, "") for k in COLS}
+                # carry self-reported fields across — see SELF_REPORTED above
+                for k in SELF_REPORTED:
+                    if r.get(k) not in (None, ""):
+                        row[k] = r[k]
+                out.append(row)
                 recomputed += 1
                 continue
             except Exception as e:                       # keep the old row, don't drop

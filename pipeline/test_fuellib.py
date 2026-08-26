@@ -7,9 +7,16 @@ import fuellib as F
 
 # ── targets ────────────────────────────────────────────────────────────────
 def test_targets_scale_with_duration():
-    _, _, c_lo_1h, _ = F.targets(60)
-    _, _, c_lo_2h, _ = F.targets(120)
-    assert c_lo_2h == pytest.approx(c_lo_1h * 2)
+    """Total carb target must RISE with duration.
+
+    It is no longer a linear multiple: the per-hour RATE itself steps up with
+    duration (see carb_bands), so a 3h ride needs more than 3x a 1h ride. The
+    invariant that matters is monotonicity, not proportionality.
+    """
+    totals = [F.targets(m)[2] for m in (60, 90, 120, 180, 300)]
+    for a, b in zip(totals, totals[1:]):
+        assert b >= a, f"carb target fell with duration: {totals}"
+    assert totals[-1] > totals[0], "long rides must need more than short ones"
 
 
 def test_short_ride_needs_no_carbs():
@@ -134,3 +141,59 @@ def test_line_flags_a_shortfall():
 def test_line_reports_bottles_not_just_ml():
     out = F.line(F.assess(1180, 150, 119))
     assert "bottles" in out
+
+
+# ── carb targets scale with duration ──────────────────────────────────────────
+# Regression: a flat 60g/h target flagged a correctly-fuelled 62min sweet-spot
+# session (30g) as "33g short". Over-prescribing short sessions teaches
+# over-fuelling, and makes the hit-rate metric untrustworthy.
+
+def test_carb_rate_short_session_needs_little():
+    lo, hi = F.carb_rate(62)
+    assert (lo, hi) == (0, 30)
+
+
+def test_carb_rate_medium_session():
+    assert F.carb_rate(90) == (30, 60)
+
+
+def test_carb_rate_long_session():
+    assert F.carb_rate(180) == (60, 90)
+
+
+def test_carb_rate_every_duration_resolves():
+    """No duration may fall through the bands — the last one is a catch-all."""
+    for m in (0, 1, 74, 75, 119, 120, 999, 5000):
+        lo, hi = F.carb_rate(m)
+        assert 0 <= lo <= hi, f"{m}min produced a nonsense band {(lo, hi)}"
+
+
+def test_carb_rate_bands_ascend():
+    """Longer rides must never need FEWER carbs than shorter ones."""
+    rates = [F.carb_rate(m) for m in (30, 90, 180, 300)]
+    for a, b in zip(rates, rates[1:]):
+        assert b[0] >= a[0] and b[1] >= a[1], f"{a} -> {b} descends"
+
+
+def test_short_session_correctly_fuelled_is_not_flagged():
+    """The exact Aug 26 case: 62.5min, 30g. Must PASS."""
+    a = F.assess(750, 30, 62.5)
+    assert a["carb_hit"] is True
+    assert a["carb_short_g"] == 0
+
+
+def test_long_session_underfuelled_is_still_flagged():
+    """Loosening short rides must not blind the long-ride case."""
+    a = F.assess(1500, 40, 180)
+    assert a["carb_hit"] is False
+    assert a["carb_short_g"] > 100
+
+
+# ── recompute must never destroy self-reported data ───────────────────────────
+def test_recompute_preserves_self_reported_fields():
+    """Regression, Aug 26 2026: a recompute wiped fluid/carb from the only two
+    rides that had it, because ridelib cannot derive them from a stream and the
+    row was rebuilt from scratch. Same shape as the Aug 20 rebuild_log incident."""
+    import recompute_log as RL
+    for f in ("fluid_ml", "carb_g", "protein_g"):
+        assert f in RL.SELF_REPORTED, f"{f} would be destroyed by a recompute"

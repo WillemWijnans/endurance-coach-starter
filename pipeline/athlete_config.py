@@ -130,12 +130,22 @@ WIND_STRONG_MS = 6                 # mean wind speed, m/s
 # real cage count and bottle size, because a bike that cannot carry the target
 # makes the target unreachable without a planned stop.
 FUEL = {
-    "fluid_ml_per_h": (500, 750),   # CALIBRATE
-    "carb_g_per_h":   (60, 90),     # 90 needs 2:1 glucose:fructose to absorb
-    "protein_g_post": 25,           # within ~1h of finishing
-    "bottle_ml":      500,          # CALIBRATE: your default bike's bottle
-    "heat_fluid_mult": 1.25,        # multiplier at/above TEMP_HOT
-    "no_fuel_below_min": 60,        # under this, ride on what you already have
+    "fluid_ml_per_h": (500, 750),
+    # Carb need scales with DURATION, not just intensity — glycogen depletion is a
+    # function of how long the ride is. A flat rate over-prescribes short sessions:
+    # a correctly-fuelled 62min sweet-spot session (30g) was flagged "33g short"
+    # under a flat 60g/h target, which teaches over-fuelling of sessions that run
+    # fine on board glycogen. Bands are (max_minutes, lo_g_per_h, hi_g_per_h),
+    # checked in order; the last entry is the catch-all for long rides.
+    "carb_bands": [
+        (75,  0,  30),   # <75min  — ride on board glycogen; a gel is optional
+        (120, 30, 60),   # 1-2h    — top up
+        (999, 60, 90),   # 2h+     — CALIBRATE: your own tested range
+    ],
+    "protein_g_post": 25,
+    "bottle_ml":      590,          # default bike; use BIKES for per-bike capacity
+    "heat_fluid_mult": 1.25,
+    "no_fuel_below_min": 60,
 }
 
 # CALIBRATE: one entry per bike. cages x bottle_ml = what you can carry.

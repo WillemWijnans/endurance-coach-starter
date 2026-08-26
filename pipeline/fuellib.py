@@ -15,6 +15,21 @@ Pure functions, no I/O — see test_fuellib.py.
 import athlete_config as C
 
 
+def carb_rate(moving_min):
+    """(lo, hi) g/h for a ride of this duration.
+
+    Carb need scales with DURATION — a flat rate over-prescribes short sessions.
+    A correctly-fuelled 62min sweet-spot session (30g) was flagged "33g short"
+    under a flat 60g/h target, which teaches over-fuelling of
+    sessions that run fine on board glycogen. Bands are checked in order; the
+    final band is the catch-all, so every duration resolves.
+    """
+    for max_min, lo, hi in C.FUEL["carb_bands"]:
+        if moving_min < max_min:
+            return (lo, hi)
+    return C.FUEL["carb_bands"][-1][1:]
+
+
 def targets(moving_min, temp_c=None):
     """(fluid_lo, fluid_hi, carb_lo, carb_hi) for a ride of this duration.
 
@@ -25,7 +40,7 @@ def targets(moving_min, temp_c=None):
     """
     hours = moving_min / 60.0
     f_lo, f_hi = C.FUEL["fluid_ml_per_h"]
-    c_lo, c_hi = C.FUEL["carb_g_per_h"]
+    c_lo, c_hi = carb_rate(moving_min)
     if temp_c is not None and temp_c >= C.TEMP_HOT:
         f_lo, f_hi = f_lo * C.FUEL["heat_fluid_mult"], f_hi * C.FUEL["heat_fluid_mult"]
     if moving_min < C.FUEL["no_fuel_below_min"]:
