@@ -17,6 +17,7 @@ import csv
 from pathlib import Path
 import athlete_config as C
 import ridelib as R
+import fuellib as FUEL
 from analyze import COLS, LOG
 
 SD = C.STREAM_DIR
@@ -26,7 +27,13 @@ SD = C.STREAM_DIR
 # recompute these, so they must be carried across from the existing row or they
 # are silently destroyed. This bit us on Aug 26 2026: a recompute wiped the
 # fluid/carb data on the only two rides that had it, minutes after it was logged.
-SELF_REPORTED = ("fluid_ml", "carb_g", "protein_g", "fluid_hit", "carb_hit")
+SELF_REPORTED = ("fluid_ml", "carb_g", "protein_g")
+
+# DERIVED from the self-reported values above plus the current targets. These
+# must be RECOMPUTED, never carried across: preserving them would freeze a
+# verdict reached under an old calibration, so changing a target would silently
+# fail to rescore history — the precise thing a recompute exists to do.
+DERIVED_FROM_SELF_REPORTED = ("fluid_hit", "carb_hit")
 
 
 def recompute():
@@ -44,6 +51,13 @@ def recompute():
                 for k in SELF_REPORTED:
                     if r.get(k) not in (None, ""):
                         row[k] = r[k]
+                # rescore the derived flags against the CURRENT targets
+                fl = float(row["fluid_ml"]) if row.get("fluid_ml") else None
+                cb = float(row["carb_g"]) if row.get("carb_g") else None
+                a = FUEL.assess(fl, cb, m.get("moving_min") or 0)
+                if a:
+                    row["fluid_hit"] = int(a["fluid_hit"]) if "fluid_hit" in a else ""
+                    row["carb_hit"] = int(a["carb_hit"]) if "carb_hit" in a else ""
                 out.append(row)
                 recomputed += 1
                 continue

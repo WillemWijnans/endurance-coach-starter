@@ -197,3 +197,13 @@ def test_recompute_preserves_self_reported_fields():
     import recompute_log as RL
     for f in ("fluid_ml", "carb_g", "protein_g"):
         assert f in RL.SELF_REPORTED, f"{f} would be destroyed by a recompute"
+
+
+def test_recompute_rescores_derived_flags():
+    """fluid_hit/carb_hit are VERDICTS, not data. Carrying them across a
+    recompute would freeze a judgement made under an old calibration, so a
+    target change would silently fail to rescore history."""
+    import recompute_log as RL
+    for f in ("fluid_hit", "carb_hit"):
+        assert f not in RL.SELF_REPORTED, f"{f} must be recomputed, not preserved"
+        assert f in RL.DERIVED_FROM_SELF_REPORTED
