@@ -25,7 +25,7 @@ mislead when a disturbance is front-loaded in the night.
 Usage:
   python3 wellness.py fetch <oldest> <newest> [out.csv]   # screened CSV
   python3 wellness.py report <oldest> <newest>            # what got screened
-  python3 wellness.py night <oldest> <newest>             # early/late splits
+  python3 wellness.py night <oldest> <newest> [--stages]  # early/late splits
 """
 import csv
 import os
@@ -213,7 +213,7 @@ def night_split(samples, window_min=NIGHT_WINDOW_MIN):
     samples: iterable of (timestamp, value). Timestamps may be datetimes, ISO
     strings, epoch s or epoch ms; order does not matter. None values dropped.
 
-    Returns {early, late, delta, min, max, n, span_min} — or None if there is
+    Returns {early, late, median, delta, min, max, n, span_min} — or None if there is
     nothing usable. If the night is shorter than the window the two ends
     overlap, so early/late both approach the whole-night mean (delta -> 0):
     that is honest rather than wrong, but check span_min before reading much
@@ -236,7 +236,16 @@ def night_split(samples, window_min=NIGHT_WINDOW_MIN):
     early = [v for s, v in pts if s - t0 <= w]
     late = [v for s, v in pts if t1 - s <= w]
     e, l = mean(early), mean(late)
+    # MEDIAN of the whole night. Added Aug 30 2026: early/late alone assume the
+    # curve rises monotonically. When it is flat or rise-then-fall, the late
+    # window reads as a collapse while the night's LEVEL was fine — that misread
+    # produced a wrongly-recommended rest day on Aug 25. Read median WITH the
+    # split, never instead of it.
+    vals = sorted(v for _, v in pts)
+    n_ = len(vals)
+    med = vals[n_//2] if n_ % 2 else (vals[n_//2 - 1] + vals[n_//2]) / 2
     return {
+        "median": round(med, 1),
         "early": round(e, 1),
         "late": round(l, 1),
         "delta": round(l - e, 1),
@@ -374,12 +383,15 @@ def sleep_detail(g, date_str):
         "restless": sl.get("restlessMomentsCount"),
         "sleep_stress": dto.get("avgSleepStress"),
         "spo2_low": dto.get("lowestSpO2Value"),
+        # DURATION is a PRIMARY signal (unlike the stage breakdown, which is a
+        # byproduct — consumer devices misidentify 30-50% of deep/REM).
+        "asleep_sec": dto.get("sleepTimeSeconds"),
         "insight": dto.get("sleepScorePersonalizedInsight"),
         "feedback": dto.get("sleepScoreFeedback"),
     }
 
 
-def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN):
+def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN, show_stages=False):
     """Early/late HRV + sleeping-HR splits for a date range."""
     g = garmin_client()
     d0, d1 = date.fromisoformat(oldest), date.fromisoformat(newest)
@@ -399,10 +411,18 @@ def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN):
         d0 += timedelta(days=1)
 
     f = lambda d, k: f"{d[k]:g}" if d and d.get(k) is not None else "-"
-    print(f"\nAUTONOMIC — first vs last {window_min}min ({oldest} -> {newest})")
-    print(f"{'date':<12}{'HRV early':>10}{'late':>6}{'peak5':>7}{'status':>11}   "
-          f"{'HR early':>9}{'late':>6}{'floor':>6}   "
-          f"{'stress early':>13}{'late':>6}   flags")
+    # ORDER SET BY THE ATHLETE (Aug 30 2026). These are the DECIDING signals:
+    # HRV, stress and HR — each as an early/late split — plus sleep DURATION.
+    # Stages and Garmin's own verdicts are a byproduct, printed separately below
+    # and never used to make a call. See "SLEEP STAGES ARE DEMOTED" in the
+    # training template (Chinoy et al. 2020: consumer devices misidentify 30-50%
+    # of deep and REM).
+    print(f"\n{'='*74}")
+    print(f"PRIMARY — decide on these.  First vs last {window_min}min ({oldest} -> {newest})")
+    print(f"{'='*74}")
+    print(f"{'date':<12}{'HRV early':>10}{'late':>6}{'med':>5}{'peak5':>7}   "
+          f"{'stress e':>9}{'late':>6}   {'HR early':>9}{'late':>6}{'floor':>6}   "
+          f"{'sleep':>7}   flags")
     for ds, hrv, hr, stress, _, hsum in days:
         flags = []
         if hrv and hrv["late"] < HRV_LATE_RECOVERED:
@@ -413,18 +433,28 @@ def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN):
         if ctx := KNOWN_CONTEXT.get(ds):
             flags.append(ctx.split("—")[0].strip())
         h = lambda k: str(hsum[k]) if hsum and hsum.get(k) is not None else "-"
-        print(f"{ds:<12}{f(hrv,'early'):>10}{f(hrv,'late'):>6}{h('high5'):>7}"
-              f"{h('status'):>11}   "
+        sd_ = next((d[4] for d in days if d[0] == ds), None)
+        secs = (sd_ or {}).get("asleep_sec")
+        dur = f"{secs//3600}h{(secs%3600)//60:02d}" if secs else "-"
+        print(f"{ds:<12}{f(hrv,'early'):>10}{f(hrv,'late'):>6}{f(hrv,'median'):>5}{h('high5'):>7}   "
+              f"{f(stress,'early'):>9}{f(stress,'late'):>6}   "
               f"{f(hr,'early'):>9}{f(hr,'late'):>6}{f(hr,'min'):>6}   "
-              f"{f(stress,'early'):>13}{f(stress,'late'):>6}   {'; '.join(flags)}")
+              f"{dur:>7}   {'; '.join(flags)}")
     b = next((d[5] for d in days if d[5] and d[5].get("balanced_low")), None)
     if b:
         print(f"  peak5 = best 5-min HRV reached (a PEAK, not a sustained level — "
               f"read it with 'late', not instead of it)")
         print(f"  Garmin personal balanced range: {b['balanced_low']}-{b['balanced_high']}")
 
-    print(f"\nSLEEP ARCHITECTURE  (deep sleep is front-loaded — it is the first "
-          f"thing a disturbed early night costs)")
+    if not show_stages:
+        print(f"\n  (stages + Garmin verdicts omitted — byproduct only. "
+              f"add --stages to show)")
+        return
+    print(f"\n{'-'*74}")
+    print(f"BYPRODUCT — context only, NEVER decide on these")
+    print(f"  Consumer devices misidentify 30-50% of deep/REM (Chinoy 2020), and")
+    print(f"  Garmin's verdicts are opaque composites. Read the PRIMARY block above.")
+    print(f"{'-'*74}")
     print(f"{'date':<12}{'deep':>6}{'rem':>5}{'light':>7}{'awake':>7}{'wakes':>7}"
           f"{'restless':>10}{'sleepStress':>12}{'spO2low':>9}   Garmin's verdict")
     for ds, _, _, _, sd, _ in days:

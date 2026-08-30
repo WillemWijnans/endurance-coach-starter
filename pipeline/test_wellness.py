@@ -274,3 +274,34 @@ def test_sleep_detail_reads_stages():
     sd = W.sleep_detail(_FakeGarmin(has_sleep=True), "2026-08-06")
     assert sd["deep_min"] == 30
     assert W.sleep_detail(_FakeGarmin(has_sleep=False), "2026-08-06") is None
+
+
+# ── night_split median (added Aug 30 2026) ────────────────────────────────────
+# early/late alone assume the curve rises monotonically. A flat or rise-then-fall
+# night reads as a collapse in the late window while the night's LEVEL was fine.
+# That misread produced a wrongly-recommended rest day.
+
+def test_night_split_reports_median():
+    sp = W.night_split([(i * 60, 50) for i in range(400)])
+    assert sp["median"] == 50
+
+
+def test_median_survives_a_non_monotonic_night():
+    """Rise then fall: late window looks bad, median shows the level was fine."""
+    rising = [(i * 60, 30 + i) for i in range(120)]          # 30 -> 149
+    falling = [((120 + i) * 60, 150 - 2 * i) for i in range(120)]
+    sp = W.night_split(rising + falling)
+    assert sp["late"] < sp["early"] + 60, "late window should look weak here"
+    assert sp["median"] > sp["late"], "median must expose the level the split hides"
+
+
+def test_median_absent_when_no_samples():
+    assert W.night_split([]) is None
+
+
+def test_sleep_detail_exposes_duration_key():
+    """Duration is a PRIMARY signal; stages are a byproduct. The key must exist
+    or the report silently prints a blank column."""
+    import inspect
+    src = inspect.getsource(W.sleep_detail)
+    assert '"asleep_sec"' in src, "duration key missing — report would blank out"
