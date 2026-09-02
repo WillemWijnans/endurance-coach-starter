@@ -305,3 +305,35 @@ def test_sleep_detail_exposes_duration_key():
     import inspect
     src = inspect.getsource(W.sleep_detail)
     assert '"asleep_sec"' in src, "duration key missing — report would blank out"
+
+
+# ── late-starting sleep window (added Sep 2 2026) ─────────────────────────────
+# A start-lag check catches readings that begin late relative to sleep onset. It
+# does NOT catch a window that is simply TRUNCATED — the device scoring nothing for
+# the first couple of hours, then starting cleanly, so the lag reads fine.
+# The signature is the first hour reading ABOVE the night's own median.
+
+def test_night_split_reports_first_hour():
+    sp = W.night_split([(i*60, 50) for i in range(400)])
+    assert sp["first_hour"] == 50
+
+
+def test_normal_night_starts_below_its_median():
+    """A real night climbs: first hour is the LOW point, not the high one."""
+    samples = [(i*60, 30 + i*0.1) for i in range(400)]      # 30 -> 70
+    sp = W.night_split(samples)
+    assert sp["first_hour"] < sp["median"]
+
+
+def test_late_started_window_starts_above_median():
+    """Truncated window: begins with HRV already elevated, then settles."""
+    samples = [(i*60, 70 - i*0.05) for i in range(400)]     # 70 -> 50
+    sp = W.night_split(samples)
+    assert sp["first_hour"] > sp["median"]
+    assert sp["first_hour"] - sp["median"] > W.LATE_WINDOW_MARGIN
+
+
+def test_flat_night_does_not_trigger_the_flag():
+    """A genuinely flat night must not be flagged — margin exists for this."""
+    sp = W.night_split([(i*60, 50) for i in range(400)])
+    assert sp["first_hour"] - sp["median"] <= W.LATE_WINDOW_MARGIN

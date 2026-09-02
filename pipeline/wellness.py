@@ -185,6 +185,7 @@ HRV_LATE_RECOVERED = C.HRV_LATE_RECOVERED
 # evening was, so a fixed cut-off flagged 8 of 9 nights once true sleep-onset
 # was included; the excess-over-floor separates cleanly:
 # CALIBRATE from ~2 weeks of your own nights; the split values themselves are the signal, this is just a hint.
+LATE_WINDOW_MARGIN = 5   # h1 median this far above the night median => window started late
 HR_EARLY_EXCESS_DISTURBED = C.HR_EARLY_EXCESS_DISTURBED
 
 
@@ -241,10 +242,19 @@ def night_split(samples, window_min=NIGHT_WINDOW_MIN):
     # window reads as a collapse while the night's LEVEL was fine — that misread
     # produced a wrongly-recommended rest day on Aug 25. Read median WITH the
     # split, never instead of it.
+    # FIRST HOUR median. A night whose first hour reads ABOVE its own median means
+    # the recording window started LATE — the device missed the settling period and
+    # only began scoring once HRV had already risen. A start-lag check does NOT catch
+    # this, because the readings themselves are clean; it is the WINDOW that is
+    # truncated, so the disturbed portion is simply absent from the average.
+    first_h = [v for s_, v in pts if s_ - t0 <= 3600]
     vals = sorted(v for _, v in pts)
     n_ = len(vals)
     med = vals[n_//2] if n_ % 2 else (vals[n_//2 - 1] + vals[n_//2]) / 2
+    fh = sorted(first_h)
+    fh_med = (fh[len(fh)//2] if len(fh) % 2 else (fh[len(fh)//2-1]+fh[len(fh)//2])/2) if fh else None
     return {
+        "first_hour": round(fh_med, 1) if fh_med is not None else None,
         "median": round(med, 1),
         "early": round(e, 1),
         "late": round(l, 1),
@@ -427,6 +437,12 @@ def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN, show_stages=False)
         flags = []
         if hrv and hrv["late"] < HRV_LATE_RECOVERED:
             flags.append("HRV not recovered")
+        # window started late — see night_split's first_hour comment
+        if (hrv and hrv.get("first_hour") is not None
+                and hrv["first_hour"] - hrv["median"] > LATE_WINDOW_MARGIN):
+            flags.append(f"⚠️ WINDOW STARTED LATE (h1 {hrv['first_hour']:g} > median "
+                         f"{hrv['median']:g}) — readings FLATTERED, real sleep is longer "
+                         f"and worse than shown")
         excess = early_excess(hr)
         if excess is not None and excess >= HR_EARLY_EXCESS_DISTURBED:
             flags.append(f"early night disturbed (+{excess:g} over floor)")
