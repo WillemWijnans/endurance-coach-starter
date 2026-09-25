@@ -337,3 +337,176 @@ def test_flat_night_does_not_trigger_the_flag():
     """A genuinely flat night must not be flagged — margin exists for this."""
     sp = W.night_split([(i*60, 50) for i in range(400)])
     assert sp["first_hour"] - sp["median"] <= W.LATE_WINDOW_MARGIN
+
+
+# ── HRV start lag (added Sep 24 2026) ─────────────────────────────────────────
+# First HRV reading minus sleep onset, on a GMT basis. See the comment block
+# above HRV_START_LAG_UNRELIABLE_MIN in wellness.py. Fixtures are SYNTHETIC
+# nights shaped like real Garmin records (epoch-ms sleep start, naive GMT ISO
+# reading times); the lags +2.8 / +2.1 match real verified nights.
+NIGHT_A_SLEEP_GMT_MS = 1_768_430_400_000          # 2026-01-14T22:40:00Z
+NIGHT_A_FIRST_GMT = "2026-01-14T22:42:45.0"       # +2m45s
+NIGHT_A_FIRST_LOCAL = "2026-01-15T00:42:45.0"     # same instant, +2h offset baked in
+NIGHT_B_SLEEP_GMT_MS = 1_768_518_600_000          # 2026-01-15T23:10:00Z
+NIGHT_B_FIRST_GMT = "2026-01-15T23:12:05.0"       # +2m05s
+
+def test_start_lag_positive_control():
+    """Known-good lags: +2.8min and +2.1min."""
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, [NIGHT_A_FIRST_GMT]) == 2.8
+    assert W.hrv_start_lag_min(NIGHT_B_SLEEP_GMT_MS, [NIGHT_B_FIRST_GMT]) == 2.1
+
+def test_start_lag_is_independent_of_machine_timezone():
+    """Naive GMT strings must be read as UTC, not as this machine's local time
+    (which is what _to_seconds does). Re-run under three zones."""
+    import os, time
+    old = os.environ.get("TZ")
+    try:
+        for tz in ("UTC", "Europe/Amsterdam", "America/Los_Angeles"):
+            os.environ["TZ"] = tz; time.tzset()
+            assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, [NIGHT_A_FIRST_GMT]) == 2.8, tz
+    finally:
+        if old is None: os.environ.pop("TZ", None)
+        else: os.environ["TZ"] = old
+        time.tzset()
+
+def test_start_lag_mixing_local_with_gmt_goes_one_offset_wrong():
+    """The classic bug, reproduced: sleepStartTimestampLocal (offset already
+    added) against a GMT reading lands NEGATIVE by exactly the +2h offset."""
+    sleep_local_ms = NIGHT_A_SLEEP_GMT_MS + 2 * 3600 * 1000
+    lag = W.hrv_start_lag_min(sleep_local_ms, [NIGHT_A_FIRST_GMT])
+    assert lag == round(2.75 - 120, 1)
+    assert "timezone bug" in W.start_lag_flag(lag)
+
+def test_start_lag_local_reading_gives_positive_offset_error():
+    """The mirror mistake — Local reading vs GMT sleep — reads +2h: a false
+    'unreliable night', which is why the Local fields are never used."""
+    lag = W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, [NIGHT_A_FIRST_LOCAL])
+    assert lag == round(2.75 + 120, 1)
+
+def test_hrv_night_returns_gmt_times_not_local():
+    """hrv_night must feed the lag from readingTimeGMT. The None-HRV reading is
+    dropped so it can't define the first reading."""
+    class G:
+        def get_hrv_data(self, d):
+            return {"hrvReadings": [
+                {"hrvValue": None, "readingTimeGMT": "2026-01-14T22:30:00.0",
+                 "readingTimeLocal": "2026-01-15T00:30:00.0"},
+                {"hrvValue": 45, "readingTimeGMT": "2026-01-14T22:47:45.0",
+                 "readingTimeLocal": "2026-01-15T00:47:45.0"},
+                {"hrvValue": 39, "readingTimeGMT": NIGHT_A_FIRST_GMT,
+                 "readingTimeLocal": NIGHT_A_FIRST_LOCAL}]}
+    samples, summary, gmt = W.hrv_night(G(), "2026-09-22")
+    assert gmt == ["2026-01-14T22:47:45.0", NIGHT_A_FIRST_GMT]
+    assert summary is None                                  # no hrvSummary
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, gmt) == 2.8   # min(), not [0]
+
+def test_start_lag_uses_earliest_reading_regardless_of_order():
+    later = "2026-01-14T23:30:00.0"
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, [later, NIGHT_A_FIRST_GMT]) == 2.8
+
+def test_start_lag_disturbed_night():
+    """External movement shape: first reading +61min after onset."""
+    sleep = NIGHT_A_SLEEP_GMT_MS
+    first = sleep // 1000 + 61 * 60
+    from datetime import datetime, timezone
+    iso = datetime.fromtimestamp(first, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0")
+    lag = W.hrv_start_lag_min(sleep, [iso])
+    assert lag == 61.0
+    assert "unreliable" in W.start_lag_flag(lag)
+
+def test_start_lag_accepts_epoch_and_z_suffix():
+    first_s = NIGHT_A_SLEEP_GMT_MS / 1000 + 165
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, [first_s]) == 2.8        # epoch s
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, [first_s * 1000]) == 2.8 # epoch ms
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, ["2026-01-14T22:42:45Z"]) == 2.8
+
+def test_start_lag_none_when_inputs_missing():
+    assert W.hrv_start_lag_min(None, [NIGHT_A_FIRST_GMT]) is None     # no sleep record
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, []) is None      # no readings
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, None) is None
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, [None, "junk"]) is None
+
+def test_start_lag_skips_junk_readings():
+    assert W.hrv_start_lag_min(NIGHT_A_SLEEP_GMT_MS, ["junk", None, NIGHT_A_FIRST_GMT]) == 2.8
+
+def test_start_lag_flag_thresholds():
+    t = W.HRV_START_LAG_UNRELIABLE_MIN
+    assert W.start_lag_flag(None) is None
+    assert W.start_lag_flag(0) is None                 # reading at onset: fine
+    assert W.start_lag_flag(2.8) is None
+    assert W.start_lag_flag(t) is None                 # "above ~20" — edge not flagged
+    assert "stages/shape unreliable" in W.start_lag_flag(t + 0.1)
+    assert "external movement" in W.start_lag_flag(t + 0.1)
+    assert "timezone bug" in W.start_lag_flag(-0.1)
+
+
+# ── night CLI args: --stages must reach night_report ─────────────────────────
+def test_parse_night_args_without_flag():
+    assert W.parse_night_args(["2026-09-22", "2026-09-23"]) == ("2026-09-22", "2026-09-23", False)
+
+def test_parse_night_args_with_stages():
+    assert W.parse_night_args(["2026-09-22", "2026-09-23", "--stages"])[2] is True
+
+def test_parse_night_args_flag_position_does_not_matter():
+    want = ("2026-09-22", "2026-09-23", True)
+    assert W.parse_night_args(["--stages", "2026-09-22", "2026-09-23"]) == want
+    assert W.parse_night_args(["2026-09-22", "--stages", "2026-09-23"]) == want
+
+def _raises(fn, *a):
+    try:
+        fn(*a)
+    except ValueError as e:
+        return str(e)
+    raise AssertionError("expected ValueError")
+
+def test_parse_night_args_rejects_unknown_flag():
+    """A typo must fail loudly, not silently drop — the original bug."""
+    assert "--stage" in _raises(W.parse_night_args, ["2026-09-22", "2026-09-23", "--stage"])
+
+def test_parse_night_args_rejects_wrong_date_count():
+    _raises(W.parse_night_args, ["2026-09-22"])
+    _raises(W.parse_night_args, ["2026-09-22", "2026-09-23", "2026-09-24"])
+    _raises(W.parse_night_args, ["--stages"])
+
+def test_parse_night_args_rejects_malformed_date():
+    _raises(W.parse_night_args, ["2026-09-22", "tomorrow"])
+
+def _capture_night_call(argv):
+    calls = []
+    orig = W.night_report
+    W.night_report = lambda *a, **k: calls.append((a, k))
+    try:
+        W.main(argv)
+    finally:
+        W.night_report = orig
+    return calls
+
+def test_main_passes_show_stages_through():
+    """End-to-end on the CLI: the flag given on argv must arrive as show_stages=True."""
+    calls = _capture_night_call(["night", "2026-09-22", "2026-09-23", "--stages"])
+    assert calls == [(("2026-09-22", "2026-09-23"), {"show_stages": True})]
+
+def test_main_defaults_show_stages_off():
+    calls = _capture_night_call(["night", "2026-09-22", "2026-09-23"])
+    assert calls == [(("2026-09-22", "2026-09-23"), {"show_stages": False})]
+
+def test_main_exits_on_bad_night_args_without_fetching():
+    try:
+        _capture_night_call(["night", "2026-09-22", "2026-09-23", "--stage"])
+    except SystemExit as e:
+        assert "--stage" in str(e.code)
+    else:
+        raise AssertionError("expected SystemExit")
+
+
+if __name__ == "__main__":
+    import sys
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    p = f = 0
+    for t in tests:
+        try:
+            t(); print(f"  PASS  {t.__name__}"); p += 1
+        except Exception as e:
+            print(f"  FAIL  {t.__name__}: {e}"); f += 1
+    print(f"\n{p} passed, {f} failed")
+    sys.exit(1 if f else 0)

@@ -30,7 +30,7 @@ Usage:
 import csv
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean
 import athlete_config as C
@@ -291,7 +291,11 @@ def garmin_client():
 
 
 def hrv_night(g, date_str):
-    """(samples, summary) for one night — one API call for both.
+    """(samples, summary, gmt_times) for one night — one API call for all three.
+
+    samples use readingTimeLocal: fine for the splits, which only need times
+    RELATIVE to each other. gmt_times (readingTimeGMT) exist for the start lag,
+    which compares against the sleep record and needs a true UTC basis.
 
     summary carries Garmin's own overnight verdict:
       high5    - best 5-min HRV reached. The PEAK, not a sustained level. It
@@ -302,8 +306,10 @@ def hrv_night(g, date_str):
       balanced_low/high - the device's personal balanced range for this wearer
     """
     d = g.get_hrv_data(date_str) or {}
-    samples = [(r.get("readingTimeLocal"), r.get("hrvValue"))
-               for r in (d.get("hrvReadings") or [])]
+    readings = d.get("hrvReadings") or []
+    samples = [(r.get("readingTimeLocal"), r.get("hrvValue")) for r in readings]
+    gmt_times = [r.get("readingTimeGMT") for r in readings
+                 if r.get("hrvValue") is not None]
     s = d.get("hrvSummary") or {}
     base = s.get("baseline") or {}
     summary = {
@@ -313,7 +319,7 @@ def hrv_night(g, date_str):
         "balanced_low": base.get("balancedLow"),
         "balanced_high": base.get("balancedUpper"),
     } if s else None
-    return samples, summary
+    return samples, summary, gmt_times
 
 
 def hrv_night_samples(g, date_str):
@@ -401,6 +407,68 @@ def sleep_detail(g, date_str):
     }
 
 
+# ------------------------------------------------------------ HRV start lag
+# HRV START LAG = first HRV reading minus sleep onset. Normally +2..5min. A lag
+# over ~20min means the watch never got clean readings early in the night —
+# typically EXTERNAL movement (a partner, child or pet in the bed; one observed
+# night read +61min) — so that night's stages and HRV SHAPE are unreliable, even
+# if its HRV level is usable. Ask what happened before interpreting the night.
+#
+# TIMEZONE TRAP: Garmin's `...TimestampLocal` / `readingTimeLocal` fields have
+# the UTC offset ALREADY ADDED. Mixing one Local field with one GMT field lands
+# exactly one offset off (e.g. -118min at a +2h offset).
+# Always compute from sleepStartTimestampGMT against readingTimeGMT. A NEGATIVE
+# lag is therefore a bug in the inputs, never physiology.
+HRV_START_LAG_UNRELIABLE_MIN = 20
+
+
+def _gmt_seconds(t):
+    """Epoch seconds for a Garmin GMT timestamp.
+
+    Garmin's GMT ISO strings ('2026-01-14T22:42:45.0') carry NO zone suffix.
+    _to_seconds() reads a naive string as MACHINE-local time, which would put
+    it one offset off — so naive strings are pinned to UTC here. Epoch numbers
+    are already absolute and go through _to_seconds unchanged.
+    """
+    if isinstance(t, str):
+        try:
+            dt = datetime.fromisoformat(t.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    return _to_seconds(t)
+
+
+def hrv_start_lag_min(sleep_start_gmt, reading_times_gmt):
+    """Minutes from sleep onset to the first HRV reading, or None.
+
+    sleep_start_gmt: sleepStartTimestampGMT (epoch ms). reading_times_gmt:
+    readingTimeGMT values, any order. Unparseable readings are ignored. The
+    result is NOT clamped: a negative value must stay visible as a bug signal.
+    """
+    s0 = _gmt_seconds(sleep_start_gmt)
+    ts = [x for x in (_gmt_seconds(t) for t in reading_times_gmt or [])
+          if x is not None]
+    if s0 is None or not ts:
+        return None
+    return round((min(ts) - s0) / 60, 1)
+
+
+def start_lag_flag(lag):
+    """Flag text for a start lag, or None when it is normal/unknown."""
+    if lag is None:
+        return None
+    if lag < 0:
+        return (f"⚠️ NEGATIVE START LAG ({lag:g}min) — timezone bug: a ...Local "
+                f"field was mixed with a GMT one")
+    if lag > HRV_START_LAG_UNRELIABLE_MIN:
+        return (f"start lag {lag:g}min — stages/shape unreliable "
+                f"(external movement?)")
+    return None
+
+
 def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN, show_stages=False):
     """Early/late HRV + sleeping-HR splits for a date range."""
     g = garmin_client()
@@ -409,13 +477,15 @@ def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN, show_stages=False)
     while d0 <= d1:
         ds = d0.isoformat()
         try:
-            samples, hsum = hrv_night(g, ds)
+            samples, hsum, gmt_times = hrv_night(g, ds)
+            lag = hrv_start_lag_min(sleep_window(g, ds)[0], gmt_times)
             days.append((ds,
                          night_split(samples, window_min),
                          night_split(hr_night_samples(g, ds), window_min),
                          night_split(stress_night_samples(g, ds), window_min),
                          sleep_detail(g, ds),
-                         hsum))
+                         hsum,
+                         lag))
         except Exception as e:                      # one bad night != abort
             print(f"{ds}  fetch failed ({type(e).__name__}: {str(e)[:60]})")
         d0 += timedelta(days=1)
@@ -432,9 +502,11 @@ def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN, show_stages=False)
     print(f"{'='*74}")
     print(f"{'date':<12}{'HRV early':>10}{'late':>6}{'med':>5}{'peak5':>7}   "
           f"{'stress e':>9}{'late':>6}   {'HR early':>9}{'late':>6}{'floor':>6}   "
-          f"{'sleep':>7}   flags")
-    for ds, hrv, hr, stress, _, hsum in days:
+          f"{'sleep':>7}{'lag':>7}   flags")
+    for ds, hrv, hr, stress, _, hsum, lag in days:
         flags = []
+        if lag_flag := start_lag_flag(lag):
+            flags.append(lag_flag)
         if hrv and hrv["late"] < HRV_LATE_RECOVERED:
             flags.append("HRV not recovered")
         # window started late — see night_split's first_hour comment
@@ -455,12 +527,15 @@ def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN, show_stages=False)
         print(f"{ds:<12}{f(hrv,'early'):>10}{f(hrv,'late'):>6}{f(hrv,'median'):>5}{h('high5'):>7}   "
               f"{f(stress,'early'):>9}{f(stress,'late'):>6}   "
               f"{f(hr,'early'):>9}{f(hr,'late'):>6}{f(hr,'min'):>6}   "
-              f"{dur:>7}   {'; '.join(flags)}")
+              f"{dur:>7}{(f'{lag:+g}' if lag is not None else '-'):>7}   "
+              f"{'; '.join(flags)}")
     b = next((d[5] for d in days if d[5] and d[5].get("balanced_low")), None)
     if b:
         print(f"  peak5 = best 5-min HRV reached (a PEAK, not a sustained level — "
               f"read it with 'late', not instead of it)")
         print(f"  Garmin personal balanced range: {b['balanced_low']}-{b['balanced_high']}")
+    print(f"  lag = HRV start lag, min from sleep onset to first reading (normal "
+          f"+2..5; >{HRV_START_LAG_UNRELIABLE_MIN} = stages/shape unreliable)")
 
     if not show_stages:
         print(f"\n  (stages + Garmin verdicts omitted — byproduct only. "
@@ -473,7 +548,7 @@ def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN, show_stages=False)
     print(f"{'-'*74}")
     print(f"{'date':<12}{'deep':>6}{'rem':>5}{'light':>7}{'awake':>7}{'wakes':>7}"
           f"{'restless':>10}{'sleepStress':>12}{'spO2low':>9}   Garmin's verdict")
-    for ds, _, _, _, sd, _ in days:
+    for ds, _, _, _, sd, _, _ in days:
         if not sd:
             print(f"{ds:<12}  no sleep record")
             continue
@@ -487,13 +562,39 @@ def night_report(oldest, newest, window_min=NIGHT_WINDOW_MIN, show_stages=False)
 
 
 # ---------------------------------------------------------------------- CLI
+NIGHT_FLAGS = {"--stages"}
+
+
+def parse_night_args(args):
+    """(oldest, newest, show_stages) from the args AFTER 'night'.
+
+    Flags may sit anywhere. An unknown flag is an error rather than silently
+    ignored — silently ignoring --stages is the exact bug this replaced.
+    """
+    flags = [a for a in args if a.startswith("--")]
+    pos = [a for a in args if not a.startswith("--")]
+    unknown = sorted(set(flags) - NIGHT_FLAGS)
+    if unknown:
+        raise ValueError(f"unknown flag(s) for night: {' '.join(unknown)}")
+    if len(pos) != 2:
+        raise ValueError(f"night needs <oldest> <newest>, got {len(pos)} date(s)")
+    for d in pos:
+        date.fromisoformat(d)             # ValueError on a malformed date
+    return pos[0], pos[1], "--stages" in flags
+
+
 def main(argv):
-    if len(argv) < 3:
-        sys.exit(__doc__.strip().split("Usage:")[1])
-    cmd, oldest, newest = argv[0], argv[1], argv[2]
-    if cmd == "night":                      # Garmin-sourced, not intervals
-        night_report(oldest, newest)
+    usage = __doc__.strip().split("Usage:")[1]
+    if argv and argv[0] == "night":         # Garmin-sourced, not intervals
+        try:
+            oldest, newest, show_stages = parse_night_args(argv[1:])
+        except ValueError as e:
+            sys.exit(f"{e}\n{usage}")
+        night_report(oldest, newest, show_stages=show_stages)
         return
+    if len(argv) < 3:
+        sys.exit(usage)
+    cmd, oldest, newest = argv[0], argv[1], argv[2]
     rows, issues = screen(fetch(oldest, newest))
     print(f"fetched {len(rows)} days ({oldest} -> {newest})")
     if issues:
