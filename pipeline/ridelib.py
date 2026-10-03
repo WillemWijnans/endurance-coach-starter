@@ -220,7 +220,20 @@ def load_meta(activity_id):
     Returns {} for older stream files captured before metadata was stored."""
     path = STREAM_DIR / f"{activity_id}.json"
     d = json.loads(path.read_text())
-    return {k: d[k] for k in ("activity_type", "name", "date") if d.get(k)}
+    return {k: d[k] for k in ("activity_type", "name", "date", "legs") if d.get(k)}
+
+def slice_streams(streams, t0, t1):
+    """The samples with t0 <= time <= t1, every stream cut identically. Time is
+    re-based to start at 0 so compute() treats the slice as its own ride.
+    Used for the per-leg view of a ride whose stream file stores leg boundaries."""
+    t = streams["time"]
+    idx = [i for i, x in enumerate(t) if t0 <= x <= t1]
+    if not idx:
+        return {k: [] for k in streams}
+    a, b = idx[0], idx[-1] + 1
+    out = {k: v[a:b] for k, v in streams.items() if isinstance(v, list) and len(v) == len(t)}
+    out["time"] = [x - t[a] for x in t[a:b]]
+    return out
 
 def compute(streams, env, ftp=FTP_DEFAULT, activity_id="", date="", name=""):
     """Compute the full metric set for one ride. Returns a flat dict."""

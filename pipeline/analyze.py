@@ -99,6 +99,25 @@ def report(m):
 {'='*60}"""
 
 
+def leg_report(streams, legs, env):
+    """Per-leg table for a merged ride. Each leg is re-run through compute() on
+    its own slice, so leg numbers use exactly the same math as whole rides."""
+    lines = [f"\n  LEGS ({len(legs)}, merged ride)",
+             f"  {'leg':<34} {'min':>5} {'NP':>4} {'HR':>5} {'Z2-%':>5} {'VE':>5} {'BR':>4}"]
+    for leg in legs:
+        s = R.slice_streams(streams, leg["start_offset_s"], leg["end_offset_s"])
+        if not s.get("time"):
+            lines.append(f"  {(leg.get('name') or leg.get('source_id') or '?')[:34]:<34}  (no samples)")
+            continue
+        m = R.compute(s, env)
+        z2 = round(m["hrREC"] + m["hrZ2"], 1)
+        lines.append(f"  {(leg.get('name') or leg.get('source_id') or '?')[:34]:<34} "
+                     f"{m['moving_min']:>5} {m['np']:>4} {m['hr_avg']:>5} {z2:>5} "
+                     f"{m['ve_avg']:>5} {m['br_avg']:>4}")
+    lines.append("  Z2-% = time at or below Z2 by heart rate")
+    return "\n".join(lines)
+
+
 def pop_flags(argv):
     """Strip --fluid/--carb/--protein/--bike out of argv so the positional args
     keep working exactly as before. Returns (remaining_argv, fuel_dict)."""
@@ -159,6 +178,8 @@ if __name__ == "__main__":
     streams = R.load_stream(aid)
     m = R.compute(streams, env, activity_id=aid, date=date, name=name)
     print(report(m))
+    if meta.get("legs"):
+        print(leg_report(streams, meta["legs"], env))
 
     # ── fuelling. A missing number is blank, never zero: scoring an unlogged
     # ride as a miss would punish forgetting to log rather than under-fuelling.
